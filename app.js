@@ -8,7 +8,7 @@
   var PROMEMORIA = [[0, 'Nessuno'], [1, '1 giorno prima'], [3, '3 giorni prima'], [7, '1 settimana prima'], [14, '2 settimane prima'], [30, '1 mese prima']];
 
   var sb = null;
-  var state = { user: null, items: [], filtro: 'tutte', form: null, busy: false, error: '', installEvt: null, loginMsg: '' };
+  var state = { user: null, items: [], filtro: 'tutte', vista: 'elenco', form: null, busy: false, error: '', installEvt: null, loginMsg: '' };
 
   var eur = new Intl.NumberFormat('it-IT', { style: 'currency', currency: 'EUR', maximumFractionDigits: 2 });
   function money(n) { return eur.format(n || 0); }
@@ -110,6 +110,10 @@
     }
     if (state.error) html += '<p class="err">' + esc(state.error) + '</p>';
 
+    html += '<div class="tabs">' + [['elenco', 'Elenco'], ['calendario', 'Calendario']].map(function (v) {
+      return '<button class="' + (state.vista === v[0] ? 'on' : '') + '" data-vista="' + v[0] + '">' + v[1] + '</button>';
+    }).join('') + '</div>';
+
     html += '<div class="grid2"><div class="metric"><small>Prossimi 30 giorni</small><b>' + money(m30) + '</b></div>' +
       '<div class="metric"><small>Costo annuo</small><b>' + money(annuo) + '</b></div></div>';
 
@@ -117,13 +121,18 @@
       return '<button class="chip' + (state.filtro === f[0] ? ' on' : '') + '" data-filtro="' + f[0] + '">' + f[1] + '</button>';
     }).join('') + '</div>';
 
-    if (urgenti.length) {
-      html += '<div class="banner">' + urgenti.length + (urgenti.length === 1 ? ' scadenza richiede' : ' scadenze richiedono') + ' attenzione.</div>';
-      html += '<div class="sec">In scadenza</div>' + urgenti.map(cardHtml).join('');
-    }
-    if (prossime.length) html += '<div class="sec">Prossime</div>' + prossime.map(cardHtml).join('');
+    html += legendHtml();
+
     if (!items.length) {
       html += '<div class="empty"><b>Aggiungi la tua prima ricorrenza</b><br>Mutuo, assicurazione, pulizia del condizionatore: tutto in un posto.</div>';
+    } else if (state.vista === 'calendario') {
+      html += calendarHtml(items, t);
+    } else {
+      if (urgenti.length) {
+        html += '<div class="banner">' + urgenti.length + (urgenti.length === 1 ? ' scadenza richiede' : ' scadenze richiedono') + ' attenzione.</div>';
+        html += '<div class="sec">In scadenza</div>' + urgenti.map(cardHtml).join('');
+      }
+      if (prossime.length) html += '<div class="sec">Prossime</div>' + prossime.map(cardHtml).join('');
     }
     html += '<button class="fab" id="nuovo">+ Nuova</button>';
     app.innerHTML = html;
@@ -137,6 +146,15 @@
     Array.prototype.forEach.call(document.querySelectorAll('[data-filtro]'), function (b) {
       b.onclick = function () { state.filtro = b.getAttribute('data-filtro'); render(); };
     });
+    Array.prototype.forEach.call(document.querySelectorAll('[data-vista]'), function (b) {
+      b.onclick = function () { state.vista = b.getAttribute('data-vista'); render(); window.scrollTo(0, 0); };
+    });
+    Array.prototype.forEach.call(document.querySelectorAll('[data-mese]'), function (b) {
+      b.onclick = function () {
+        var el = document.getElementById('m-' + b.getAttribute('data-mese'));
+        if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      };
+    });
     Array.prototype.forEach.call(document.querySelectorAll('[data-open]'), function (b) {
       b.onclick = function () { apriForm(b.getAttribute('data-open')); };
     });
@@ -145,18 +163,84 @@
     });
   }
 
+  // Testo della scadenza: quanti giorni mancano, oppure la data se non è urgente
+  function whenText(dateStr, urg, t) {
+    var d = L.daysUntil(dateStr, t);
+    if (d < 0) return 'Scaduta da ' + (-d) + ' gg';
+    if (d === 0) return 'Oggi';
+    if (urg === 'soon') return 'Tra ' + d + (d === 1 ? ' giorno' : ' gg');
+    return dShort(dateStr);
+  }
+
+  function avatarClass(i) { return 'c-' + esc(i.categoria) + (i.tipo === 'manutenzione' ? ' ring' : ''); }
+
+  function legendHtml() {
+    return '<div class="lg">' + CATEGORIE.map(function (c) {
+      return '<span><i class="c-' + c[0] + '"></i>' + c[1] + '</span>';
+    }).join('') + '<span><i class="fill"></i>Spesa</span><span><i class="ring"></i>Manutenzione</span></div>';
+  }
+
   function cardHtml(i) {
-    var d = L.daysUntil(i.prossima_scadenza);
-    var when, cls = '';
-    if (d < 0) { when = 'Scaduta da ' + (-d) + (d === -1 ? ' giorno' : ' giorni'); cls = 'late'; }
-    else if (d === 0) { when = 'Oggi'; cls = 'late'; }
-    else if (d <= (i.promemoria_giorni || 0)) { when = 'Tra ' + d + (d === 1 ? ' giorno' : ' giorni'); cls = 'soon'; }
-    else when = dShort(i.prossima_scadenza);
+    var t = L.today();
+    var urg = L.urgency(i, t);
+    var when = whenText(i.prossima_scadenza, urg, t);
+    var whenHtml = (urg === 'late' || urg === 'soon')
+      ? '<span class="u ' + urg + '">' + (urg === 'late' ? '! ' : '') + esc(when) + '</span>'
+      : '<span class="s">' + esc(when) + '</span>';
     var sub = L.label(i) + (i.allegato_path ? ' · allegato' : '');
-    return '<div class="card"><div class="av c-' + esc(i.categoria) + '">' + esc((i.nome || '?').charAt(0).toUpperCase()) + '</div>' +
+    return '<div class="card u-' + urg + '"><div class="av ' + avatarClass(i) + '">' + esc((i.nome || '?').charAt(0).toUpperCase()) + '</div>' +
       '<div class="main" data-open="' + esc(i.id) + '"><div class="t">' + esc(i.nome) + '</div><div class="s">' + esc(sub) + '</div></div>' +
-      '<div class="r"><b>' + (i.importo != null ? money(i.importo) : '—') + '</b><span class="s ' + cls + '">' + esc(when) + '</span></div>' +
+      '<div class="r"><b>' + (i.importo != null ? money(i.importo) : '—') + '</b>' + whenHtml + '</div>' +
       '<button class="done" data-done="' + esc(i.id) + '" aria-label="Segna come fatta">✓</button></div>';
+  }
+
+  /* ---------- Vista calendario ---------- */
+  function calendarHtml(items, t) {
+    var mesi = L.monthlyTotals(items, t, 12);
+    var ev = L.events(items, t, 12);
+    var max = Math.max.apply(null, mesi.map(function (m) { return m.total; }).concat([1]));
+    var H = 100;
+
+    var bars = '<div class="bars">' + mesi.map(function (m) {
+      var segs = CATEGORIE.map(function (c) {
+        var v = m.byCat[c[0]] || 0;
+        return v ? '<span class="c-' + c[0] + '" style="height:' + Math.max(3, Math.round(v / max * H)) + 'px"></span>' : '';
+      }).join('');
+      return '<button class="bar" data-mese="' + m.key + '" aria-label="' + esc(m.full + ': ' + money(m.total)) + '">' + segs + '</button>';
+    }).join('') + '</div>';
+    var labels = '<div class="mths">' + mesi.map(function (m, k) {
+      return '<span' + (k === 0 ? ' class="now"' : '') + '>' + m.initial + '</span>';
+    }).join('') + '</div>';
+
+    var heavy = mesi.reduce(function (a, b) { return b.total > a.total ? b : a; }, mesi[0]);
+    var chart = '<div class="chart">' + bars + labels +
+      '<p class="s" style="margin:8px 0 0">Spesa prevista nei prossimi 12 mesi' +
+      (heavy.total > 0 ? '. Mese più pesante: ' + esc(heavy.full) + ', ' + money(heavy.total) : '') + '.</p></div>';
+
+    var totals = {}; mesi.forEach(function (m) { totals[m.key] = m; });
+    var groups = {}, order = [];
+    ev.forEach(function (e) {
+      var k = L.monthKeyOf(e, t);
+      if (!groups[k]) { groups[k] = []; order.push(k); }
+      groups[k].push(e);
+    });
+
+    var tl = '<div class="tl">' + order.map(function (k) {
+      var m = totals[k];
+      var head = '<p class="m" id="m-' + k + '"><b>' + esc(m.full) + ' ' + m.year + '</b><span>' + (m.total ? money(m.total) : '') + '</span></p>';
+      return head + groups[k].map(function (e) {
+        var i = e.item, urg = L.urgencyOf(e.date, i.promemoria_giorni, t);
+        var when = whenText(e.date, urg, t);
+        var whenHtml = (urg === 'late' || urg === 'soon')
+          ? '<span class="u ' + urg + '">' + (urg === 'late' ? '! ' : '') + esc(when) + '</span>'
+          : '<span class="sb">' + esc(dShort(e.date)) + '</span>';
+        return '<div class="it ' + urg + '" data-open="' + esc(i.id) + '"><span class="dot c-' + esc(i.categoria) + (i.tipo === 'manutenzione' ? ' ring' : '') + (urg === 'late' || urg === 'soon' ? ' ' + urg : '') + '"></span>' +
+          '<div><p class="nm">' + esc(i.nome) + '</p><p class="sb">' + esc(L.label(i)) + '</p></div>' +
+          '<div class="r">' + (i.importo != null ? '<p class="nm">' + money(i.importo) + '</p>' : '') + whenHtml + '</div></div>';
+      }).join('');
+    }).join('') + '</div>';
+
+    return chart + tl;
   }
 
   /* ---------- Segna come fatta ---------- */

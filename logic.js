@@ -84,11 +84,70 @@
     return item.frequenza.charAt(0).toUpperCase() + item.frequenza.slice(1);
   }
 
+  var MESI = ['Gennaio', 'Febbraio', 'Marzo', 'Aprile', 'Maggio', 'Giugno', 'Luglio', 'Agosto', 'Settembre', 'Ottobre', 'Novembre', 'Dicembre'];
+
+  // Livello di urgenza di una data: late (scaduta o oggi), soon (entro il promemoria), far (oltre 90 giorni), normal
+  function urgencyOf(dateStr, promemoria, from) {
+    var d = daysUntil(dateStr, from);
+    if (d <= 0) return 'late';
+    if (d <= (promemoria || 0)) return 'soon';
+    if (d > 90) return 'far';
+    return 'normal';
+  }
+
+  function urgency(item, from) { return urgencyOf(item.prossima_scadenza, item.promemoria_giorni, from); }
+
+  // Ultimo giorno del mese che chiude una finestra di n mesi a partire da `from`
+  function windowEnd(from, n) {
+    var d = parse(from), m = d.getUTCMonth() + n, y = d.getUTCFullYear() + Math.floor(m / 12);
+    m = m % 12;
+    return fmt(new Date(Date.UTC(y, m, 0)));
+  }
+
+  // Tutte le scadenze nella finestra, in ordine di data. Una scadenza già passata compare una sola volta (overdue)
+  function events(items, from, n) {
+    var end = windowEnd(from, n), out = [];
+    items.forEach(function (it) {
+      if (it.prossima_scadenza < from) out.push({ date: it.prossima_scadenza, item: it, overdue: true });
+      occurrences(it, from, end).forEach(function (d) { out.push({ date: d, item: it, overdue: false }); });
+    });
+    out.sort(function (a, b) { return a.date < b.date ? -1 : a.date > b.date ? 1 : 0; });
+    return out;
+  }
+
+  // Chiave del mese (AAAA-MM) a cui assegnare l'evento: le scadenze passate contano nel mese corrente
+  function monthKeyOf(e, from) { return (e.overdue ? from : e.date).slice(0, 7); }
+
+  // Totali per mese e per categoria su n mesi
+  function monthlyTotals(items, from, n) {
+    var d0 = parse(from), months = [], idx = {};
+    for (var i = 0; i < n; i++) {
+      var m = d0.getUTCMonth() + i, y = d0.getUTCFullYear() + Math.floor(m / 12);
+      m = m % 12;
+      var key = y + '-' + pad(m + 1);
+      var mo = { key: key, year: y, month: m, full: MESI[m], initial: MESI[m].charAt(0), total: 0, byCat: {}, count: 0 };
+      months.push(mo); idx[key] = mo;
+    }
+    events(items, from, n).forEach(function (e) {
+      var mo = idx[monthKeyOf(e, from)];
+      if (!mo) return;
+      mo.count++;
+      if (e.item.importo != null && e.item.importo !== '') {
+        var v = Number(e.item.importo);
+        mo.total += v;
+        mo.byCat[e.item.categoria] = (mo.byCat[e.item.categoria] || 0) + v;
+      }
+    });
+    return months;
+  }
+
   var api = {
-    PRESETS: PRESETS, STAGIONI: STAGIONI, parse: parse, fmt: fmt, today: today,
+    PRESETS: PRESETS, STAGIONI: STAGIONI, MESI: MESI, parse: parse, fmt: fmt, today: today,
     addDays: addDays, addInterval: addInterval, daysUntil: daysUntil,
     occurrences: occurrences, annualCost: annualCost, perYear: perYear,
-    seasonDate: seasonDate, label: label
+    seasonDate: seasonDate, label: label,
+    urgencyOf: urgencyOf, urgency: urgency, windowEnd: windowEnd, events: events,
+    monthKeyOf: monthKeyOf, monthlyTotals: monthlyTotals
   };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.RicLogic = api;
