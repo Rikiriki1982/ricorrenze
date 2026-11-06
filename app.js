@@ -8,7 +8,7 @@
   var PROMEMORIA = [[0, 'Nessuno'], [1, '1 giorno prima'], [3, '3 giorni prima'], [7, '1 settimana prima'], [14, '2 settimane prima'], [30, '1 mese prima']];
 
   var sb = null;
-  var state = { user: null, items: [], filtro: 'tutte', vista: 'elenco', mese: L.today().slice(0, 7), giorno: null, form: null, busy: false, error: '', installEvt: null, loginMsg: '' };
+  var state = { user: null, items: [], storico: [], filtro: 'tutte', vista: 'elenco', mese: L.today().slice(0, 7), giorno: null, form: null, busy: false, error: '', installEvt: null, loginMsg: '' };
 
   var eur = new Intl.NumberFormat('it-IT', { style: 'currency', currency: 'EUR', maximumFractionDigits: 2 });
   function money(n) { return eur.format(n || 0); }
@@ -45,8 +45,14 @@
   }
 
   function caricaTutto() {
-    return sb.from('ricorrenze').select('*').eq('attiva', true).order('prossima_scadenza', { ascending: true }).then(function (r) {
-      if (r.error) { state.error = 'Non riesco a leggere i dati: ' + r.error.message; } else { state.items = r.data || []; state.error = ''; }
+    return Promise.all([
+      sb.from('ricorrenze').select('*').eq('attiva', true).order('prossima_scadenza', { ascending: true }),
+      sb.from('ricorrenze_storico').select('id,ricorrenza_id,data,importo,created_at').order('data', { ascending: true })
+    ]).then(function (rs) {
+      var r = rs[0], h = rs[1];
+      if (r.error) { state.error = 'Non riesco a leggere i dati: ' + r.error.message; }
+      else { state.items = r.data || []; state.error = ''; }
+      if (!h.error) state.storico = h.data || [];
       render();
     });
   }
@@ -137,6 +143,10 @@
         html += '<div class="sec">In scadenza</div>' + urgenti.map(cardHtml).join('');
       }
       if (prossime.length) html += '<div class="sec">Prossime</div>' + prossime.map(cardHtml).join('');
+      var cur = t.slice(0, 7);
+      var pagate = paidEvents(function (e) { return e.date.slice(0, 7) === cur || localMonth(e.s.created_at) === cur; })
+        .sort(function (a, b) { return a.date < b.date ? 1 : -1; });
+      if (pagate.length) html += '<div class="sec">Pagate questo mese</div>' + pagate.map(paidCardHtml).join('');
     }
     html += '<button class="fab" id="nuovo">+ Nuova</button>';
     app.innerHTML = html;
@@ -156,7 +166,7 @@
     Array.prototype.forEach.call(document.querySelectorAll('[data-mnav]'), function (b) {
       b.onclick = function () {
         var next = L.shiftMonth(state.mese, Number(b.getAttribute('data-mnav')));
-        if (next < t.slice(0, 7) || next > L.shiftMonth(t.slice(0, 7), 36)) return;
+        if (next < L.shiftMonth(t.slice(0, 7), -12) || next > L.shiftMonth(t.slice(0, 7), 36)) return;
         state.mese = next; state.giorno = null; render();
       };
     });
@@ -177,6 +187,9 @@
     Array.prototype.forEach.call(document.querySelectorAll('[data-open]'), function (b) {
       b.onclick = function () { apriForm(b.getAttribute('data-open')); };
     });
+    Array.prototype.forEach.call(document.querySelectorAll('[data-undo]'), function (b) {
+      b.onclick = function () { annullaPagamento(b.getAttribute('data-undo')); };
+    });
     Array.prototype.forEach.call(document.querySelectorAll('[data-done]'), function (b) {
       b.onclick = function () { fatto(b.getAttribute('data-done')); };
     });
@@ -193,10 +206,50 @@
 
   function avatarClass(i) { return 'c-' + esc(i.categoria) + (i.tipo === 'manutenzione' ? ' ring' : ''); }
 
+  /* ---------- Pagamenti ---------- */
+  function itemById(id) { return state.items.filter(function (x) { return x.id === id; })[0]; }
+  function doneLabel(i) { return i.tipo === 'manutenzione' ? 'Segna come fatta' : 'Segna come pagata'; }
+  function paidWord(i) { return i.tipo === 'manutenzione' ? 'Fatto' : 'Pagato'; }
+  function localMonth(iso) {
+    var d = new Date(iso);
+    return isNaN(d) ? '' : d.getFullYear() + '-' + (d.getMonth() < 9 ? '0' : '') + (d.getMonth() + 1);
+  }
+  function passFiltro(i) { return state.filtro === 'tutte' || i.tipo === state.filtro; }
+
+  // Si può annullare solo l'ultimo pagamento di una ricorrenza (quello subito prima della scadenza attuale)
+  function canUndo(s) {
+    var i = itemById(s.ricorrenza_id);
+    return !!i && i.prossima_scadenza === L.addInterval(s.data, i.ogni, i.unita, i.giorno_mese);
+  }
+
+  function paidEvents(filtroMese) {
+    return state.storico.map(function (s) {
+      var i = itemById(s.ricorrenza_id);
+      return i && passFiltro(i) ? { date: s.data, item: i, importo: s.importo, paid: true, s: s } : null;
+    }).filter(function (e) { return e && (!filtroMese || filtroMese(e)); });
+  }
+
+  function paidCardHtml(e) {
+    var i = e.item, s = e.s;
+    return '<div class="card paid"><div class="av ' + avatarClass(i) + '">' + esc((i.nome || '?').charAt(0).toUpperCase()) + '</div>' +
+      '<div class="main" data-open="' + esc(i.id) + '"><div class="t">' + esc(i.nome) + '</div><div class="s">' + esc(L.label(i) + ' · scadenza ' + dShort(s.data)) + '</div></div>' +
+      '<div class="r">' + (s.importo != null ? '<b>' + money(s.importo) + '</b>' : '') + '<span class="u ok">✓ ' + paidWord(i) + '</span></div>' +
+      (canUndo(s) ? '<button class="undo" data-undo="' + esc(s.id) + '" aria-label="Annulla">↶</button>' : '') + '</div>';
+  }
+
+  function paidRowHtml(e) {
+    var i = e.item, s = e.s, d = L.parse(e.date);
+    return '<div class="mrow paid' + (state.giorno === e.date ? ' sel' : '') + '" data-row-date="' + e.date + '">' +
+      '<div class="dt"><b>' + d.getUTCDate() + '</b><span>' + L.GIORNI_BREVI[d.getUTCDay()] + '</span></div>' +
+      '<div class="main" data-open="' + esc(i.id) + '"><div class="t">' + dotHtml(i) + ' ' + esc(i.nome) + '</div><div class="s">' + esc(L.label(i)) + '</div><span class="u ok">✓ ' + paidWord(i) + '</span></div>' +
+      '<div class="r">' + (s.importo != null ? '<b>' + money(s.importo) + '</b>' : '') + '</div>' +
+      (canUndo(s) ? '<button class="undo" data-undo="' + esc(s.id) + '" aria-label="Annulla">↶</button>' : '') + '</div>';
+  }
+
   function legendHtml() {
     return '<div class="lg">' + CATEGORIE.map(function (c) {
       return '<span><i class="c-' + c[0] + '"></i>' + c[1] + '</span>';
-    }).join('') + '<span><i class="fill"></i>Spesa</span><span><i class="ring"></i>Manutenzione</span></div>';
+    }).join('') + '<span><i class="fill"></i>Spesa</span><span><i class="ring"></i>Manutenzione</span><span><i class="paid"></i>Pagato</span></div>';
   }
 
   function cardHtml(i) {
@@ -210,7 +263,7 @@
     return '<div class="card u-' + urg + '"><div class="av ' + avatarClass(i) + '">' + esc((i.nome || '?').charAt(0).toUpperCase()) + '</div>' +
       '<div class="main" data-open="' + esc(i.id) + '"><div class="t">' + esc(i.nome) + '</div><div class="s">' + esc(sub) + '</div></div>' +
       '<div class="r"><b>' + (i.importo != null ? money(i.importo) : '—') + '</b>' + whenHtml + '</div>' +
-      '<button class="done" data-done="' + esc(i.id) + '" aria-label="Segna come fatta">✓</button></div>';
+      '<button class="done" data-done="' + esc(i.id) + '" aria-label="' + doneLabel(i) + '">✓</button></div>';
   }
 
   /* ---------- Vista mese ---------- */
@@ -230,16 +283,18 @@
       '<div class="dt"><b>' + d.getUTCDate() + '</b><span>' + L.GIORNI_BREVI[d.getUTCDay()] + '</span></div>' +
       '<div class="main" data-open="' + esc(i.id) + '"><div class="t">' + dotHtml(i) + ' ' + esc(i.nome) + '</div><div class="s">' + esc(L.label(i) + (i.allegato_path ? ' · allegato' : '')) + '</div>' + urgLabel(urg, when) + '</div>' +
       '<div class="r">' + (i.importo != null ? '<b>' + money(i.importo) + '</b>' : '') + '</div>' +
-      (isFirst ? '<button class="done" data-done="' + esc(i.id) + '" aria-label="Segna come fatta">✓</button>' : '') + '</div>';
+      (isFirst ? '<button class="done" data-done="' + esc(i.id) + '" aria-label="' + doneLabel(i) + '">✓</button>' : '') + '</div>';
   }
 
   function meseHtml(items, t) {
     var key = state.mese, cur = t.slice(0, 7);
-    var ev = L.monthEvents(items, key);
+    var ev = L.monthEvents(items, key).map(function (e) { return { date: e.date, item: e.item, paid: false }; });
+    var pagati = paidEvents(function (e) { return e.date.slice(0, 7) === key; });
+    var all = ev.concat(pagati);
     var byDay = {};
-    ev.forEach(function (e) { (byDay[e.date] = byDay[e.date] || []).push(e); });
+    all.forEach(function (e) { (byDay[e.date] = byDay[e.date] || []).push(e); });
 
-    var canPrev = key > cur, canNext = key < L.shiftMonth(cur, 36);
+    var canPrev = key > L.shiftMonth(cur, -12), canNext = key < L.shiftMonth(cur, 36);
     var h = '<div class="cal-hd"><button class="nav" data-mnav="-1" aria-label="Mese precedente"' + (canPrev ? '' : ' disabled') + '>‹</button>' +
       '<b>' + esc(L.monthName(key)) + '</b>' +
       '<button class="nav" data-mnav="1" aria-label="Mese successivo"' + (canNext ? '' : ' disabled') + '>›</button></div>';
@@ -249,34 +304,41 @@
     for (var k = 0; k < off; k++) h += '<div class="dy off"></div>';
     for (var dd = 1; dd <= n; dd++) {
       var date = key + '-' + (dd < 10 ? '0' : '') + dd, es = byDay[date] || [];
-      var late = es.some(function (e) { return L.urgencyOf(e.date, e.item.promemoria_giorni, t) === 'late'; });
+      var late = es.some(function (e) { return !e.paid && L.urgencyOf(e.date, e.item.promemoria_giorni, t) === 'late'; });
       h += '<button class="dy' + (date === t ? ' today' : '') + (late ? ' late' : '') + (state.giorno === date ? ' sel' : '') + '" data-giorno="' + date + '" aria-label="' + dd + (es.length ? ', ' + es.length + ' scadenze' : '') + '">' +
         '<span class="n">' + dd + '</span><span class="dts">' +
-        es.slice(0, 3).map(function (e) { return dotHtml(e.item); }).join('') + (es.length > 3 ? '<span class="more">+</span>' : '') + '</span></button>';
+        es.slice(0, 3).map(function (e) { return dotHtml(e.item, e.paid ? ' paid' : ''); }).join('') + (es.length > 3 ? '<span class="more">+</span>' : '') + '</span></button>';
     }
     h += '</div>';
 
     var scad = key === cur ? L.overdueItems(items, t) : [];
     var scadIds = {}; scad.forEach(function (i) { scadIds[i.id] = true; });
-    var lista = ev.filter(function (e) { return !(scadIds[e.item.id] && e.date === e.item.prossima_scadenza); });
-    var tot = 0; ev.forEach(function (e) { if (e.item.importo != null) tot += Number(e.item.importo); });
-    var fuori = scad.filter(function (i) { return i.prossima_scadenza < key + '-01'; }).length;
+    var lista = ev.filter(function (e) { return !(scadIds[e.item.id] && e.date === e.item.prossima_scadenza); }).concat(pagati);
+    lista.sort(function (a, b) { return a.date < b.date ? -1 : a.date > b.date ? 1 : (a.paid ? -1 : 1); });
+
+    var tot = 0, daPagare = 0;
+    ev.forEach(function (e) { if (e.item.importo != null) { tot += Number(e.item.importo); daPagare += Number(e.item.importo); } });
+    pagati.forEach(function (e) { var v = e.importo != null ? e.importo : e.item.importo; if (v != null) tot += Number(v); });
+    scad.forEach(function (i) { if (i.prossima_scadenza < key + '-01' && i.importo != null) daPagare += Number(i.importo); });
     h += '<div class="mt"><div><span class="s">Totale del mese</span><b>' + money(tot) + '</b></div>' +
-      '<div><span class="s">Scadenze</span><b>' + (ev.length + fuori) + '</b></div></div>';
+      '<div><span class="s">' + (key < cur ? 'Non pagato' : 'Da pagare') + '</span><b>' + money(daPagare) + '</b></div></div>';
 
     if (scad.length) {
       h += '<div class="sec late">Scadute</div>' + scad.map(function (i) { return rowHtml(i.prossima_scadenza, i, t, true, state.giorno === i.prossima_scadenza); }).join('');
     }
     h += '<div class="sec">Scadenze di ' + esc(L.MESI[+key.slice(5, 7) - 1].toLowerCase()) + '</div>';
-    if (!lista.length) h += '<div class="empty">Nessun\'altra scadenza in questo mese.</div>';
-    else h += lista.map(function (e) { return rowHtml(e.date, e.item, t, e.date === e.item.prossima_scadenza, state.giorno === e.date); }).join('');
+    if (!lista.length) h += '<div class="empty">' + (key < cur ? 'Nessun pagamento registrato in questo mese.' : 'Nessun\'altra scadenza in questo mese.') + '</div>';
+    else h += lista.map(function (e) {
+      return e.paid ? paidRowHtml(e) : rowHtml(e.date, e.item, t, e.date === e.item.prossima_scadenza, state.giorno === e.date);
+    }).join('');
     return h;
   }
 
   /* ---------- Vista anno ---------- */
   function annoHtml(items, t) {
-    var mesi = L.monthlyTotals(items, t, 12);
-    var ct = L.categoryTotals(items, t, 12);
+    var paga = paidEvents(null);
+    var mesi = L.monthlyTotals(items, t, 12, paga);
+    var ct = L.categoryTotals(items, t, 12, paga);
     var h = '<div class="sec" style="margin-top:4px">Spesa prevista nei prossimi 12 mesi</div><div class="card" style="display:block">';
 
     if (ct.total <= 0) {
@@ -314,26 +376,48 @@
   }
 
   /* ---------- Segna come fatta ---------- */
+  function ordina() { state.items.sort(function (a, b) { return a.prossima_scadenza < b.prossima_scadenza ? -1 : 1; }); }
+
   function fatto(id) {
-    var i = state.items.filter(function (x) { return x.id === id; })[0];
+    var i = itemById(id);
     if (!i) return;
     var prev = i.prossima_scadenza;
     var next = L.addInterval(prev, i.ogni, i.unita, i.giorno_mese);
     sb.from('ricorrenze').update({ prossima_scadenza: next }).eq('id', id).then(function (r) {
       if (r.error) return toast('Non riesco ad aggiornare: ' + r.error.message);
-      i.prossima_scadenza = next;
-      state.items.sort(function (a, b) { return a.prossima_scadenza < b.prossima_scadenza ? -1 : 1; });
-      render();
-      sb.from('ricorrenze_storico').insert({ ricorrenza_id: id, data: prev, importo: i.importo }).select('id').then(function (h) {
-        var hid = h.data && h.data[0] ? h.data[0].id : null;
-        toast('Fatto. Prossima: ' + dShort(next), 'Annulla', function () {
-          sb.from('ricorrenze').update({ prossima_scadenza: prev }).eq('id', id).then(function () {
-            if (hid) sb.from('ricorrenze_storico').delete().eq('id', hid).then(function () { });
-            i.prossima_scadenza = prev;
-            state.items.sort(function (a, b) { return a.prossima_scadenza < b.prossima_scadenza ? -1 : 1; });
-            render();
-          });
-        });
+      sb.from('ricorrenze_storico').insert({ ricorrenza_id: id, data: prev, importo: i.importo }).select('id,ricorrenza_id,data,importo,created_at').then(function (h) {
+        var rec = h.data && h.data[0];
+        if (h.error || !rec) {
+          sb.from('ricorrenze').update({ prossima_scadenza: prev }).eq('id', id).then(function () { });
+          return toast('Non riesco a registrare il pagamento. Riprova.');
+        }
+        i.prossima_scadenza = next;
+        ordina();
+        state.storico.push(rec);
+        render();
+        toast(paidWord(i) + '. Prossima: ' + dShort(next), 'Annulla', function () { annullaPagamento(rec.id, true); });
+      });
+    });
+  }
+
+  function annullaPagamento(sid, silenzioso) {
+    var s = state.storico.filter(function (x) { return x.id === sid; })[0];
+    var i = s && itemById(s.ricorrenza_id);
+    if (!s || !i) return;
+    if (!canUndo(s)) return toast('Si può annullare solo l\'ultimo pagamento di una ricorrenza.');
+    var corrente = i.prossima_scadenza;
+    sb.from('ricorrenze').update({ prossima_scadenza: s.data }).eq('id', i.id).then(function (r) {
+      if (r.error) return toast('Non riesco ad annullare: ' + r.error.message);
+      sb.from('ricorrenze_storico').delete().eq('id', sid).then(function (d) {
+        if (d.error) {
+          sb.from('ricorrenze').update({ prossima_scadenza: corrente }).eq('id', i.id).then(function () { });
+          return toast('Non riesco ad annullare: ' + d.error.message);
+        }
+        i.prossima_scadenza = s.data;
+        ordina();
+        state.storico = state.storico.filter(function (x) { return x.id !== sid; });
+        render();
+        if (!silenzioso) toast('Pagamento annullato');
       });
     });
   }

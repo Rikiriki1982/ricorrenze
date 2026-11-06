@@ -1,4 +1,4 @@
-var CACHE = 'ricorrenze-v3';
+var CACHE = 'ricorrenze-v4';
 var SHELL = ['./', 'index.html', 'app.js', 'logic.js', 'config.js', 'manifest.json', 'icon-192.png', 'icon-512.png'];
 
 self.addEventListener('install', function (e) {

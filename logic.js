@@ -119,7 +119,7 @@
   function monthKeyOf(e, from) { return (e.overdue ? from : e.date).slice(0, 7); }
 
   // Totali per mese e per categoria su n mesi
-  function monthlyTotals(items, from, n) {
+  function monthlyTotals(items, from, n, paid) {
     var d0 = parse(from), months = [], idx = {};
     for (var i = 0; i < n; i++) {
       var m = d0.getUTCMonth() + i, y = d0.getUTCFullYear() + Math.floor(m / 12);
@@ -128,15 +128,20 @@
       var mo = { key: key, year: y, month: m, full: MESI[m], initial: MESI[m].charAt(0), total: 0, byCat: {}, count: 0 };
       months.push(mo); idx[key] = mo;
     }
+    function add(mo, cat, v) {
+      mo.count++;
+      if (v == null || v === '' || isNaN(Number(v))) return;
+      mo.total += Number(v);
+      mo.byCat[cat] = (mo.byCat[cat] || 0) + Number(v);
+    }
     events(items, from, n).forEach(function (e) {
       var mo = idx[monthKeyOf(e, from)];
-      if (!mo) return;
-      mo.count++;
-      if (e.item.importo != null && e.item.importo !== '') {
-        var v = Number(e.item.importo);
-        mo.total += v;
-        mo.byCat[e.item.categoria] = (mo.byCat[e.item.categoria] || 0) + v;
-      }
+      if (mo) add(mo, e.item.categoria, e.item.importo);
+    });
+    // Scadenze già pagate: restano nel mese in cui cadevano (paid = [{date, item, importo}])
+    (paid || []).forEach(function (p) {
+      var mo = idx[p.date.slice(0, 7)];
+      if (mo && p.date >= from.slice(0, 7) + '-01') add(mo, p.item.categoria, p.importo != null ? p.importo : p.item.importo);
     });
     return months;
   }
@@ -179,9 +184,9 @@
   }
 
   // Totale per categoria su n mesi (somma di monthlyTotals)
-  function categoryTotals(items, from, n) {
+  function categoryTotals(items, from, n, paid) {
     var tot = {}, sum = 0;
-    monthlyTotals(items, from, n).forEach(function (m) {
+    monthlyTotals(items, from, n, paid).forEach(function (m) {
       Object.keys(m.byCat).forEach(function (c) { tot[c] = (tot[c] || 0) + m.byCat[c]; sum += m.byCat[c]; });
     });
     return { byCat: tot, total: sum };
