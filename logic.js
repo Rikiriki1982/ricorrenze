@@ -43,7 +43,7 @@
   // Scadenze dell'elemento comprese tra from e to (estremi inclusi), a partire da prossima_scadenza
   function occurrences(item, from, to) {
     var out = [], cur = item.prossima_scadenza, n = 0;
-    while (cur <= to && n < 800) {
+    while (cur <= to && n < 2000) {
       if (cur >= from) out.push(cur);
       cur = addInterval(cur, item.ogni, item.unita, item.giorno_mese);
       n++;
@@ -141,7 +141,56 @@
     return months;
   }
 
+  var MESI_BREVI = ['Gen', 'Feb', 'Mar', 'Apr', 'Mag', 'Giu', 'Lug', 'Ago', 'Set', 'Ott', 'Nov', 'Dic'];
+  var GIORNI_BREVI = ['dom', 'lun', 'mar', 'mer', 'gio', 'ven', 'sab'];
+
+  function monthRange(key) {
+    var y = +key.slice(0, 4), m = +key.slice(5, 7) - 1;
+    return [key + '-01', fmt(new Date(Date.UTC(y, m + 1, 0)))];
+  }
+
+  function daysInMonth(key) { return +monthRange(key)[1].slice(8); }
+
+  // 0 = lunedì ... 6 = domenica
+  function weekdayMon(dateStr) { return (parse(dateStr).getUTCDay() + 6) % 7; }
+
+  function shiftMonth(key, delta) {
+    var y = +key.slice(0, 4), m = +key.slice(5, 7) - 1 + delta;
+    y += Math.floor(m / 12); m = ((m % 12) + 12) % 12;
+    return y + '-' + pad(m + 1);
+  }
+
+  function monthName(key) { return MESI[+key.slice(5, 7) - 1] + ' ' + key.slice(0, 4); }
+
+  // Scadenze che cadono nel mese indicato (AAAA-MM), in ordine di data
+  function monthEvents(items, key) {
+    var r = monthRange(key), out = [];
+    items.forEach(function (it) {
+      occurrences(it, r[0], r[1]).forEach(function (d) { out.push({ date: d, item: it }); });
+    });
+    out.sort(function (a, b) { return a.date < b.date ? -1 : a.date > b.date ? 1 : 0; });
+    return out;
+  }
+
+  // Scadenze già passate e non ancora segnate come fatte
+  function overdueItems(items, from) {
+    return items.filter(function (it) { return it.prossima_scadenza < from; })
+      .sort(function (a, b) { return a.prossima_scadenza < b.prossima_scadenza ? -1 : 1; });
+  }
+
+  // Totale per categoria su n mesi (somma di monthlyTotals)
+  function categoryTotals(items, from, n) {
+    var tot = {}, sum = 0;
+    monthlyTotals(items, from, n).forEach(function (m) {
+      Object.keys(m.byCat).forEach(function (c) { tot[c] = (tot[c] || 0) + m.byCat[c]; sum += m.byCat[c]; });
+    });
+    return { byCat: tot, total: sum };
+  }
+
   var api = {
+    MESI_BREVI: MESI_BREVI, GIORNI_BREVI: GIORNI_BREVI, monthRange: monthRange, daysInMonth: daysInMonth,
+    weekdayMon: weekdayMon, shiftMonth: shiftMonth, monthName: monthName, monthEvents: monthEvents,
+    overdueItems: overdueItems, categoryTotals: categoryTotals,
     PRESETS: PRESETS, STAGIONI: STAGIONI, MESI: MESI, parse: parse, fmt: fmt, today: today,
     addDays: addDays, addInterval: addInterval, daysUntil: daysUntil,
     occurrences: occurrences, annualCost: annualCost, perYear: perYear,

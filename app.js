@@ -8,7 +8,7 @@
   var PROMEMORIA = [[0, 'Nessuno'], [1, '1 giorno prima'], [3, '3 giorni prima'], [7, '1 settimana prima'], [14, '2 settimane prima'], [30, '1 mese prima']];
 
   var sb = null;
-  var state = { user: null, items: [], filtro: 'tutte', vista: 'elenco', form: null, busy: false, error: '', installEvt: null, loginMsg: '' };
+  var state = { user: null, items: [], filtro: 'tutte', vista: 'elenco', mese: L.today().slice(0, 7), giorno: null, form: null, busy: false, error: '', installEvt: null, loginMsg: '' };
 
   var eur = new Intl.NumberFormat('it-IT', { style: 'currency', currency: 'EUR', maximumFractionDigits: 2 });
   function money(n) { return eur.format(n || 0); }
@@ -110,12 +110,14 @@
     }
     if (state.error) html += '<p class="err">' + esc(state.error) + '</p>';
 
-    html += '<div class="tabs">' + [['elenco', 'Elenco'], ['calendario', 'Calendario']].map(function (v) {
+    html += '<div class="tabs">' + [['elenco', 'Elenco'], ['mese', 'Mese'], ['anno', 'Anno']].map(function (v) {
       return '<button class="' + (state.vista === v[0] ? 'on' : '') + '" data-vista="' + v[0] + '">' + v[1] + '</button>';
     }).join('') + '</div>';
 
-    html += '<div class="grid2"><div class="metric"><small>Prossimi 30 giorni</small><b>' + money(m30) + '</b></div>' +
-      '<div class="metric"><small>Costo annuo</small><b>' + money(annuo) + '</b></div></div>';
+    if (state.vista === 'elenco') {
+      html += '<div class="grid2"><div class="metric"><small>Prossimi 30 giorni</small><b>' + money(m30) + '</b></div>' +
+        '<div class="metric"><small>Costo annuo</small><b>' + money(annuo) + '</b></div></div>';
+    }
 
     html += '<div class="chips">' + [['tutte', 'Tutte'], ['spesa', 'Spese'], ['manutenzione', 'Manutenzioni']].map(function (f) {
       return '<button class="chip' + (state.filtro === f[0] ? ' on' : '') + '" data-filtro="' + f[0] + '">' + f[1] + '</button>';
@@ -125,8 +127,10 @@
 
     if (!items.length) {
       html += '<div class="empty"><b>Aggiungi la tua prima ricorrenza</b><br>Mutuo, assicurazione, pulizia del condizionatore: tutto in un posto.</div>';
-    } else if (state.vista === 'calendario') {
-      html += calendarHtml(items, t);
+    } else if (state.vista === 'mese') {
+      html += meseHtml(items, t);
+    } else if (state.vista === 'anno') {
+      html += annoHtml(items, t);
     } else {
       if (urgenti.length) {
         html += '<div class="banner">' + urgenti.length + (urgenti.length === 1 ? ' scadenza richiede' : ' scadenze richiedono') + ' attenzione.</div>';
@@ -149,11 +153,26 @@
     Array.prototype.forEach.call(document.querySelectorAll('[data-vista]'), function (b) {
       b.onclick = function () { state.vista = b.getAttribute('data-vista'); render(); window.scrollTo(0, 0); };
     });
-    Array.prototype.forEach.call(document.querySelectorAll('[data-mese]'), function (b) {
+    Array.prototype.forEach.call(document.querySelectorAll('[data-mnav]'), function (b) {
       b.onclick = function () {
-        var el = document.getElementById('m-' + b.getAttribute('data-mese'));
-        if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        var next = L.shiftMonth(state.mese, Number(b.getAttribute('data-mnav')));
+        if (next < t.slice(0, 7) || next > L.shiftMonth(t.slice(0, 7), 36)) return;
+        state.mese = next; state.giorno = null; render();
       };
+    });
+    Array.prototype.forEach.call(document.querySelectorAll('[data-giorno]'), function (b) {
+      b.onclick = function () {
+        var g = b.getAttribute('data-giorno');
+        state.giorno = state.giorno === g ? null : g;
+        render();
+        if (state.giorno) {
+          var r = document.querySelector('[data-row-date="' + state.giorno + '"]');
+          if (r) r.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        }
+      };
+    });
+    Array.prototype.forEach.call(document.querySelectorAll('[data-annomese]'), function (b) {
+      b.onclick = function () { state.mese = b.getAttribute('data-annomese'); state.giorno = null; state.vista = 'mese'; render(); window.scrollTo(0, 0); };
     });
     Array.prototype.forEach.call(document.querySelectorAll('[data-open]'), function (b) {
       b.onclick = function () { apriForm(b.getAttribute('data-open')); };
@@ -194,53 +213,104 @@
       '<button class="done" data-done="' + esc(i.id) + '" aria-label="Segna come fatta">✓</button></div>';
   }
 
-  /* ---------- Vista calendario ---------- */
-  function calendarHtml(items, t) {
-    var mesi = L.monthlyTotals(items, t, 12);
-    var ev = L.events(items, t, 12);
-    var max = Math.max.apply(null, mesi.map(function (m) { return m.total; }).concat([1]));
-    var H = 100;
+  /* ---------- Vista mese ---------- */
+  function urgLabel(urg, when) {
+    return (urg === 'late' || urg === 'soon') ? '<span class="u ' + urg + '">' + (urg === 'late' ? '! ' : '') + esc(when) + '</span>' : '';
+  }
 
-    var bars = '<div class="bars">' + mesi.map(function (m) {
+  function dotHtml(i, extra) {
+    return '<span class="d c-' + esc(i.categoria) + (i.tipo === 'manutenzione' ? ' ring' : '') + (extra || '') + '"></span>';
+  }
+
+  function rowHtml(date, i, t, isFirst, sel) {
+    var urg = L.urgencyOf(date, i.promemoria_giorni, t);
+    var when = whenText(date, urg, t);
+    var d = L.parse(date);
+    return '<div class="mrow u-' + urg + (sel ? ' sel' : '') + '" data-row-date="' + date + '">' +
+      '<div class="dt"><b>' + d.getUTCDate() + '</b><span>' + L.GIORNI_BREVI[d.getUTCDay()] + '</span></div>' +
+      '<div class="main" data-open="' + esc(i.id) + '"><div class="t">' + dotHtml(i) + ' ' + esc(i.nome) + '</div><div class="s">' + esc(L.label(i) + (i.allegato_path ? ' · allegato' : '')) + '</div>' + urgLabel(urg, when) + '</div>' +
+      '<div class="r">' + (i.importo != null ? '<b>' + money(i.importo) + '</b>' : '') + '</div>' +
+      (isFirst ? '<button class="done" data-done="' + esc(i.id) + '" aria-label="Segna come fatta">✓</button>' : '') + '</div>';
+  }
+
+  function meseHtml(items, t) {
+    var key = state.mese, cur = t.slice(0, 7);
+    var ev = L.monthEvents(items, key);
+    var byDay = {};
+    ev.forEach(function (e) { (byDay[e.date] = byDay[e.date] || []).push(e); });
+
+    var canPrev = key > cur, canNext = key < L.shiftMonth(cur, 36);
+    var h = '<div class="cal-hd"><button class="nav" data-mnav="-1" aria-label="Mese precedente"' + (canPrev ? '' : ' disabled') + '>‹</button>' +
+      '<b>' + esc(L.monthName(key)) + '</b>' +
+      '<button class="nav" data-mnav="1" aria-label="Mese successivo"' + (canNext ? '' : ' disabled') + '>›</button></div>';
+
+    h += '<div class="wk"><span>Lun</span><span>Mar</span><span>Mer</span><span>Gio</span><span>Ven</span><span>Sab</span><span>Dom</span></div><div class="gr">';
+    var off = L.weekdayMon(key + '-01'), n = L.daysInMonth(key);
+    for (var k = 0; k < off; k++) h += '<div class="dy off"></div>';
+    for (var dd = 1; dd <= n; dd++) {
+      var date = key + '-' + (dd < 10 ? '0' : '') + dd, es = byDay[date] || [];
+      var late = es.some(function (e) { return L.urgencyOf(e.date, e.item.promemoria_giorni, t) === 'late'; });
+      h += '<button class="dy' + (date === t ? ' today' : '') + (late ? ' late' : '') + (state.giorno === date ? ' sel' : '') + '" data-giorno="' + date + '" aria-label="' + dd + (es.length ? ', ' + es.length + ' scadenze' : '') + '">' +
+        '<span class="n">' + dd + '</span><span class="dts">' +
+        es.slice(0, 3).map(function (e) { return dotHtml(e.item); }).join('') + (es.length > 3 ? '<span class="more">+</span>' : '') + '</span></button>';
+    }
+    h += '</div>';
+
+    var scad = key === cur ? L.overdueItems(items, t) : [];
+    var scadIds = {}; scad.forEach(function (i) { scadIds[i.id] = true; });
+    var lista = ev.filter(function (e) { return !(scadIds[e.item.id] && e.date === e.item.prossima_scadenza); });
+    var tot = 0; ev.forEach(function (e) { if (e.item.importo != null) tot += Number(e.item.importo); });
+    var fuori = scad.filter(function (i) { return i.prossima_scadenza < key + '-01'; }).length;
+    h += '<div class="mt"><div><span class="s">Totale del mese</span><b>' + money(tot) + '</b></div>' +
+      '<div><span class="s">Scadenze</span><b>' + (ev.length + fuori) + '</b></div></div>';
+
+    if (scad.length) {
+      h += '<div class="sec late">Scadute</div>' + scad.map(function (i) { return rowHtml(i.prossima_scadenza, i, t, true, state.giorno === i.prossima_scadenza); }).join('');
+    }
+    h += '<div class="sec">Scadenze di ' + esc(L.MESI[+key.slice(5, 7) - 1].toLowerCase()) + '</div>';
+    if (!lista.length) h += '<div class="empty">Nessun\'altra scadenza in questo mese.</div>';
+    else h += lista.map(function (e) { return rowHtml(e.date, e.item, t, e.date === e.item.prossima_scadenza, state.giorno === e.date); }).join('');
+    return h;
+  }
+
+  /* ---------- Vista anno ---------- */
+  function annoHtml(items, t) {
+    var mesi = L.monthlyTotals(items, t, 12);
+    var ct = L.categoryTotals(items, t, 12);
+    var h = '<div class="sec" style="margin-top:4px">Spesa prevista nei prossimi 12 mesi</div><div class="card" style="display:block">';
+
+    if (ct.total <= 0) {
+      h += '<div class="empty">Aggiungi un importo alle ricorrenze per vedere la spesa prevista.</div>';
+    } else {
+      var R = 44, CI = 2 * Math.PI * R, off = 0;
+      var cats = CATEGORIE.filter(function (c) { return ct.byCat[c[0]] > 0; }).sort(function (a, b) { return ct.byCat[b[0]] - ct.byCat[a[0]]; });
+      var svg = '<svg class="don" viewBox="0 0 120 120" role="img" aria-label="Spesa annua per categoria"><circle cx="60" cy="60" r="' + R + '" fill="none" stroke="var(--line)" stroke-width="16"/>';
+      cats.forEach(function (c) {
+        var len = ct.byCat[c[0]] / ct.total * CI;
+        svg += '<circle class="seg c-' + c[0] + '" cx="60" cy="60" r="' + R + '" fill="none" stroke-width="16" stroke-dasharray="' + len.toFixed(2) + ' ' + (CI - len).toFixed(2) + '" stroke-dashoffset="' + (-off).toFixed(2) + '" transform="rotate(-90 60 60)"/>';
+        off += len;
+      });
+      svg += '<text x="60" y="58" text-anchor="middle" font-size="14" font-weight="700" fill="var(--text)">' + esc(Math.round(ct.total).toLocaleString('it-IT')) + ' €</text>' +
+        '<text x="60" y="73" text-anchor="middle" font-size="9" fill="var(--muted)">in 12 mesi</text></svg>';
+      h += '<div class="dn">' + svg + '<div class="lgd">' + cats.map(function (c) {
+        return '<div><i class="sw c-' + c[0] + '"></i>' + esc(c[1]) + '<span>' + Math.round(ct.byCat[c[0]] / ct.total * 100) + '%</span></div>';
+      }).join('') + '</div></div>';
+    }
+    h += '</div>';
+
+    var mx = Math.max.apply(null, mesi.map(function (m) { return m.total; }).concat([1]));
+    h += '<div class="sec">Mese per mese</div><div class="card" style="display:block;padding:6px 12px">' + mesi.map(function (m) {
       var segs = CATEGORIE.map(function (c) {
         var v = m.byCat[c[0]] || 0;
-        return v ? '<span class="c-' + c[0] + '" style="height:' + Math.max(3, Math.round(v / max * H)) + 'px"></span>' : '';
+        return v ? '<span class="c-' + c[0] + '" style="flex:' + v + '"></span>' : '';
       }).join('');
-      return '<button class="bar" data-mese="' + m.key + '" aria-label="' + esc(m.full + ': ' + money(m.total)) + '">' + segs + '</button>';
-    }).join('') + '</div>';
-    var labels = '<div class="mths">' + mesi.map(function (m, k) {
-      return '<span' + (k === 0 ? ' class="now"' : '') + '>' + m.initial + '</span>';
-    }).join('') + '</div>';
-
-    var heavy = mesi.reduce(function (a, b) { return b.total > a.total ? b : a; }, mesi[0]);
-    var chart = '<div class="chart">' + bars + labels +
-      '<p class="s" style="margin:8px 0 0">Spesa prevista nei prossimi 12 mesi' +
-      (heavy.total > 0 ? '. Mese più pesante: ' + esc(heavy.full) + ', ' + money(heavy.total) : '') + '.</p></div>';
-
-    var totals = {}; mesi.forEach(function (m) { totals[m.key] = m; });
-    var groups = {}, order = [];
-    ev.forEach(function (e) {
-      var k = L.monthKeyOf(e, t);
-      if (!groups[k]) { groups[k] = []; order.push(k); }
-      groups[k].push(e);
-    });
-
-    var tl = '<div class="tl">' + order.map(function (k) {
-      var m = totals[k];
-      var head = '<p class="m" id="m-' + k + '"><b>' + esc(m.full) + ' ' + m.year + '</b><span>' + (m.total ? money(m.total) : '') + '</span></p>';
-      return head + groups[k].map(function (e) {
-        var i = e.item, urg = L.urgencyOf(e.date, i.promemoria_giorni, t);
-        var when = whenText(e.date, urg, t);
-        var whenHtml = (urg === 'late' || urg === 'soon')
-          ? '<span class="u ' + urg + '">' + (urg === 'late' ? '! ' : '') + esc(when) + '</span>'
-          : '<span class="sb">' + esc(dShort(e.date)) + '</span>';
-        return '<div class="it ' + urg + '" data-open="' + esc(i.id) + '"><span class="dot c-' + esc(i.categoria) + (i.tipo === 'manutenzione' ? ' ring' : '') + (urg === 'late' || urg === 'soon' ? ' ' + urg : '') + '"></span>' +
-          '<div><p class="nm">' + esc(i.nome) + '</p><p class="sb">' + esc(L.label(i)) + '</p></div>' +
-          '<div class="r">' + (i.importo != null ? '<p class="nm">' + money(i.importo) + '</p>' : '') + whenHtml + '</div></div>';
-      }).join('');
-    }).join('') + '</div>';
-
-    return chart + tl;
+      var label = L.MESI_BREVI[m.month] + (m.month === 0 || m === mesi[0] ? ' ' + String(m.year).slice(2) : '');
+      return '<button class="yrow' + (m.total === mx && mx > 1 ? ' max' : '') + '" data-annomese="' + m.key + '" aria-label="' + esc(m.full + ' ' + m.year + ': ' + money(m.total)) + '">' +
+        '<span class="ml">' + label + '</span><span class="track"><span class="fill" style="width:' + (m.total / mx * 100).toFixed(1) + '%">' + segs + '</span></span>' +
+        '<span class="am">' + (m.total ? esc(Math.round(m.total).toLocaleString('it-IT')) + ' €' : '—') + '</span></button>';
+    }).join('') + '</div>' +
+      '<p class="s" style="margin:8px 2px">Tocca un mese per vederne le scadenze.</p>';
+    return h;
   }
 
   /* ---------- Segna come fatta ---------- */
